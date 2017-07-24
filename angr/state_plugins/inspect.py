@@ -78,6 +78,7 @@ inspect_attributes = {
 
     'simprocedure_name',
     'simprocedure_addr',
+    'simprocedure',
 
     'path',
     }
