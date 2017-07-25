@@ -1,6 +1,6 @@
 import nose
 import os
-import archinfo
+import sys
 import angr
 import subprocess
 
