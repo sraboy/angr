@@ -14,9 +14,11 @@ class Match:
         self.flirtaddr      = addr | binary.mapped_base
         self.kb             = kb
         self.binary         = binary
-        
-        self.check_symbols()
-        self.check_kb()
+
+        if self.binary is not None:
+            self.check_symbols()
+        if self.kb is not None:
+            self.check_kb()
 
     def check_symbols(self):
         sym = self.binary.get_symbol(self.flirtfunc.name)
@@ -66,10 +68,9 @@ class SigScan(Analysis):
         self.user_addrs     = addrs
         self.exclude_addrs  = exclude
 
-        self.bs      = self.binary.binary_stream
-        self.scanner = None
-        self.matches = []
-        
+        self.bs             = self.binary.binary_stream
+        self.scanner        = None
+
         if self.method == 'flirt':
             self.scanner = FlirtScan(self, **kwargs)
 
@@ -129,14 +130,6 @@ class SigScan(Analysis):
         else:
             l.warn('No scanner specified.')
 
-        return self.matches
-
-# TODO: HACK for nampa
-# The callback from nampa has to be a static method so we
-# keep a reference to the currently-running instance. We should
-# probably just put in a PR to add the ability to pass an
-# additional parameter, and we can pass the instance there
-# flirtinstance = None
 
 # TODO: Make most of this static so it can be run on an arbitrary binary
 # TODO: Inherit Analysis, move most of SigScan out to utils
@@ -145,9 +138,12 @@ class FlirtScan:
     .. |nampa| replace:: :mod:`nampa`
     A wrapper around nampa to provide FLIRT signature scanning.
     """
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent=None, bs=None, addrlist=[], **kwargs):
         """
-        :param kwargs:  Options to control the scan. See below.
+        :param parent:      The SigScan instance used to launch this scanner
+        :param bs:          If `parent` is None, the binary stream (``file``) object to scan
+        :param addrlist:    if `parent` is None, the addresses to scan
+        :param kwargs:      Options to control the scan. See Keyword Arguments.
 
         .. |nampa| replace:: :mod:`nampa`
         :Keyword Arguments:
@@ -163,10 +159,19 @@ class FlirtScan:
         """
         self.parent     = parent
         self.callback   = kwargs.get('callback', self._nampa_callback)
-        self.signatures = self._load_signatures(kwargs.get('sigpath', os.getcwd()))
-        self.addrlist   = self.parent._get_addrs()
+        self.addrlist   = addrlist if self.parent is None else self.parent._get_addrs()
+        self.bs         = bs       if self.parent is None else self.parent.bs
 
-        FlirtScan._cur_instance = self      # Bit of a hack for nampa. See above.
+        self.signatures = self._load_signatures(kwargs.get('sigpath', os.getcwd()))
+        self.matches    = []
+
+        # TODO: HACK for nampa
+        # The callback from nampa has to be a static method since it only
+        # passes its `func` instance and the address, so we need to keep
+        # a reference to the currently-running FlirtScan instance. We should
+        # probably just put in a PR to add the ability to pass a **kwargs
+        # param and we can pass the instance there.
+        FlirtScan._cur_instance = self
 
     #
     # Static vars
@@ -176,8 +181,18 @@ class FlirtScan:
 
     @staticmethod
     def _nampa_callback(addr, func):
-        match = Match(func, addr, FlirtScan._cur_instance.parent.kb, FlirtScan._cur_instance.parent.binary)
-        FlirtScan._cur_instance.parent.matches.append(match)
+        """
+        The callback for nampa to call on every matched function
+        """
+        kb = None
+        binary = None
+
+        if FlirtScan._cur_instance.parent is not None:
+            kb = FlirtScan._cur_instance.parent.kb
+            binary = FlirtScan._cur_instance.parent.binary
+
+        match = Match(func, addr, kb, binary)
+        FlirtScan._cur_instance.matches.append(match)
 
     def scan(self):
         self._match_addrs(self.addrlist)
@@ -201,9 +216,9 @@ class FlirtScan:
             l.debug('Scanning %d addresses with SIG for %s', len(addrlist), s.header.library_name)
             for addr in addrlist:
                 start = addr ^ self.parent.binary.mapped_base
-                end = addr + 32
-                self.parent.bs.seek(start, 0)
-                buf = self.parent.bs.read(end - start + FlirtScan._FUNCTION_TAIL_LENGTH)
+                end = addr + 64 # TODO: Symbols give a size. KB functions do not... need something here
+                self.bs.seek(start, 0)
+                buf = self.bs.read(end - start + FlirtScan._FUNCTION_TAIL_LENGTH)
                 nampa.match_function(s, buf, start, self.callback)
 
 
