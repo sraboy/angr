@@ -22,8 +22,8 @@ class Match:
         self.match_sym_name = False
         self.match_sym_addr = False
         self.match_kb       = False
-        self.funcname       = name
-        self.funcaddr       = addr
+        self.funcname       = funcname
+        self.funcaddr       = funcaddr
         self.kb             = kb
         self.backend        = backend
 
