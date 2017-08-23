@@ -28,26 +28,31 @@ class Match:
         self.backend        = backend
 
         if self.backend is not None:
-            self.check_symbols()
+            self._check_symbols()
         if self.kb is not None:
-            self.check_kb()
+            self._check_kb()
 
-        if rename_kb and self.match_kb: # match_kb verifies not only that kb is not None
-            self.do_rename()            # but also that the address was found within it
+        if rename_kb:
+            self.try_rename()
 
-    def check_symbols(self):
+    def _check_symbols(self):
         sym = self.backend.get_symbol(self.funcname)
         if sym is not None:
             self.match_sym_name = True
         if self.funcaddr ^ self.backend.mapped_base in self.backend.symbols_by_addr:
             self.match_sym_addr = True
 
-    def check_kb(self):
+    def _check_kb(self):
         if self.funcaddr ^ self.backend.mapped_base in self.kb.functions:
             self.match_kb = True
 
-    def do_rename(self):
-        self.kb.functions[self.funcaddr ^ self.backend.mapped_base].name = self.funcname
+    def try_rename(self):
+        if self.match_kb:
+            f = self.kb.functions[self.funcaddr ^ self.backend.mapped_base].name
+            f.name = self.funcname
+            l.warn('Renamed %s to %s', f.name, self.funcname)
+        else:
+            l.warn('Function %s not in KB. Skipping rename.', self.funcname)
 
 
 class SigScan(Analysis):
