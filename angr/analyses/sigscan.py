@@ -32,6 +32,9 @@ class Match:
         if self.kb is not None:
             self.check_kb()
 
+        if rename_kb and self.match_kb: # match_kb verifies not only that kb is not None
+            self.do_rename()            # but also that the address was found within it
+
     def check_symbols(self):
         sym = self.backend.get_symbol(self.name)
         if sym is not None:
@@ -42,6 +45,10 @@ class Match:
     def check_kb(self):
         if self.funcaddr ^ self.backend.mapped_base in self.kb.functions:
             self.match_kb = True
+
+    def do_rename(self):
+        self.kb.functions[self.funcaddr ^ self.backend.mapped_base].name = self.funcname
+
 
 class SigScan(Analysis):
     """
