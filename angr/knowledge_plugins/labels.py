@@ -37,7 +37,8 @@ class Labels(KnowledgeBasePlugin):
 
     def __delitem__(self, k):
         if k in self._labels:
-            del self._reverse_labels[self._labels[k]]
+            if self._labels[k] in self._reverse_labels:
+                del self._reverse_labels[self._labels[k]]
             del self._labels[k]
 
     def __contains__(self, k):
