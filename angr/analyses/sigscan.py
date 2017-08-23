@@ -36,7 +36,7 @@ class Match:
             self.do_rename()            # but also that the address was found within it
 
     def check_symbols(self):
-        sym = self.backend.get_symbol(self.name)
+        sym = self.backend.get_symbol(self.funcname)
         if sym is not None:
             self.match_sym_name = True
         if self.funcaddr ^ self.backend.mapped_base in self.backend.symbols_by_addr:
