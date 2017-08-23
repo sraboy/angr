@@ -48,9 +48,10 @@ class Match:
 
     def try_rename(self):
         if self.match_kb:
-            f = self.kb.functions[self.funcaddr ^ self.backend.mapped_base].name
-            f.name = self.funcname
-            l.warn('Renamed %s to %s', f.name, self.funcname)
+            f = self.kb.functions[self.funcaddr ^ self.backend.mapped_base]
+            if f.name != self.funcname:
+                f.name = self.funcname
+                #l.warn('Renamed %s to %s', f.name, self.funcname)
         else:
             l.warn('Function %s not in KB. Skipping rename.', self.funcname)
 
@@ -99,6 +100,13 @@ class SigScan(Analysis):
             else:
                 self.cfg = self.project.cfg
 
+        if self.use_sym and not self.kb:
+            self.use_sym = False
+            l.warn('No KB found. Ignoring use_sym.')
+        if self.use_kb and not self.kb:
+            self.use_kb = False
+            l.warn('No KB found. Ignoring use_kb.')
+            
         try:
             ScanClass = registered_signature_scanners[method.lower()]
             self.scanner = ScanClass(addrlist=self._get_addrs(),
