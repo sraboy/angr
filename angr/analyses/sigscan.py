@@ -4,14 +4,12 @@ import os
 import logging
 
 l = logging.getLogger('angr.analyses.sigscan')
-l.setLevel(logging.INFO)
-
 
 class Match:
     """
     Defines a positive match, or 'find', from a signature scan
     """
-    def __init__(self, funcname, funcaddr, kb, backend, rename_kb):
+    def __init__(self, funcname, funcaddr, kb, backend, rename_kb, duplicate):
         """
         :param funcname:    The name of the matched function
         :param funcaddr:    The address of the matched function
@@ -26,7 +24,8 @@ class Match:
         self.funcaddr       = funcaddr
         self.kb             = kb
         self.backend        = backend
-
+        self.duplicate      = duplicate
+        
         if self.backend is not None:
             self._check_symbols()
         if self.kb is not None:
@@ -39,19 +38,22 @@ class Match:
         sym = self.backend.get_symbol(self.funcname)
         if sym is not None:
             self.match_sym_name = True
-        if self.funcaddr ^ self.backend.mapped_base in self.backend.symbols_by_addr:
+        if self.funcaddr + self.backend.mapped_base in self.backend.symbols_by_addr:
             self.match_sym_addr = True
 
     def _check_kb(self):
-        if self.funcaddr ^ self.backend.mapped_base in self.kb.functions:
+        if self.funcaddr + self.backend.mapped_base in self.kb.functions:
             self.match_kb = True
 
     def try_rename(self):
         if self.match_kb:
-            f = self.kb.functions[self.funcaddr ^ self.backend.mapped_base]
+            if self.duplicate:
+                l.warn('DUPLICATE. Skipping rename of %s at %08x', self.funcname, self.funcaddr)
+                return
+            f = self.kb.functions[self.funcaddr + self.backend.mapped_base]
             if f.name != self.funcname:
                 f.name = self.funcname
-                #l.warn('Renamed %s to %s', f.name, self.funcname)
+                l.debug('Renamed %s to %s', f.name, self.funcname)
         else:
             l.warn('Function %s not in KB. Skipping rename.', self.funcname)
 
@@ -110,6 +112,7 @@ class SigScan(Analysis):
         try:
             ScanClass = registered_signature_scanners[method.lower()]
             self.scanner = ScanClass(addrlist=self._get_addrs(),
+                                     funclist=self._get_funcs(),
                                      bs=self.bs,
                                      rename=self.rename,
                                      kb=self.kb,
@@ -164,6 +167,19 @@ class SigScan(Analysis):
             return []
         return [f.addr for f in self.cfg.nodes() if f.name is None ]
 
+    def _get_funcs(self):
+        # TODO: Remove excluded funcs
+        # TODO: Only get 'sub_*' KB funcs
+        sym_funcs = []
+        kb_funcs  = []
+        if self.use_sym is True:
+            sym_funcs = [v for k,v in self.backend.symbols_by_addr.items() if v.is_function is True]
+        if self.use_kb is True:
+            kb_funcs = [v for k,v in self.kb.functions.items() if not v.is_syscall and not v.is_simprocedure and v.name.startswith('sub_')]
+        print sym_funcs
+        print kb_funcs
+        return set(sym_funcs + kb_funcs)        # TODO: Obviously, set doens't work on two different types...
+            
     def _get_addrs(self):
         """
         Returns the complete, sorted list of all addresses to scan based on provided options
@@ -172,10 +188,10 @@ class SigScan(Analysis):
         kb_addrs  = []
         cfg_addrs = []
 
-        if self.use_sym is True:
-            sym_addrs = self.sym_func_addrs
-        if self.use_kb is True:
-            kb_addrs = self.kb_func_addrs
+        #if self.use_sym is True:
+        #    sym_addrs = self.sym_func_addrs
+        #if self.use_kb is True:
+        #    kb_addrs = self.kb_func_addrs
         if self.use_cfg_nodes is True:
             cfg_addrs = self.cfg_unnamed_node_addrs
 
@@ -196,7 +212,7 @@ class SigScan(Analysis):
         return '<%s Signature Scan Result at %#x>' % (scanner._name, id(scanner))
 
 class SigScanBase(object):
-    def __init__(self, addrlist, bs, rename=False, kb=None, backend=None, offset=0, **kwargs):
+    def __init__(self, addrlist, funclist, bs, rename=False, kb=None, backend=None, offset=0, **kwargs):
         """
         :param addrlist:    The addresses to scan
         :param bs:          The binary stream (``file``) object to scan
@@ -211,6 +227,7 @@ class SigScanBase(object):
         :param kwargs:      Various options for child classes
         """
         self.addrlist   = addrlist
+        self.funclist   = funclist
         self.rename     = rename
         self.bs         = bs
         self.kb         = kb
@@ -233,8 +250,8 @@ class FlirtScan(SigScanBase):
     If used as an Angr project, see `SigScan`. If used independently, note the
     various Keyword Arguments that must be provided.
     """
-    def __init__(self, addrlist, bs, rename=False, kb=None, backend=None, offset=0, **kwargs):
-        super(FlirtScan, self).__init__(addrlist=addrlist, bs=bs, rename=rename, kb=kb, backend=backend, offset=offset, **kwargs)
+    def __init__(self, addrlist, funclist, bs, rename=False, kb=None, backend=None, offset=0, **kwargs):
+        super(FlirtScan, self).__init__(addrlist=addrlist, funclist=funclist, bs=bs, rename=rename, kb=kb, backend=backend, offset=offset, **kwargs)
         """
         :param sigpath:     Path to a FLIRT signature file or a directory. If a directory, only
                             files ending with `.sig` are considered. Defaults to ``os.getcwd()``.
@@ -282,13 +299,20 @@ class FlirtScan(SigScanBase):
         kb      = FlirtScan._cur_instance.kb
         backend = FlirtScan._cur_instance.backend
         rename  = FlirtScan._cur_instance.rename
+        duplicate = False
+        for m in FlirtScan._cur_instance.matches:
+            if m.funcname == func.name: #or m.funcaddr == addr:
+                duplicate = True
+                l.warn('%s at 0x%08x is duplicate of %s at 0x%08x', func.name, addr, m.funcname, m.funcaddr)
 
-        match = Match(func.name, addr, kb, backend, rename)
-        l.debug('Matched %s at %x', func.name, addr)
+        offaddr = addr + func.offset
+        match = Match(func.name, offaddr, kb, backend, rename, duplicate)
+        l.debug('Matched %s at %x', func.name, offaddr)
         FlirtScan._cur_instance.matches.append(match)
 
     def scan(self):
         self._match_addrs(self.addrlist, self.offset)
+        self._match_funcs(self.funclist, self.offset)
         FlirtScan._cur_instance = None
 
     def _load_signatures(self, sigpath):
@@ -309,8 +333,21 @@ class FlirtScan(SigScanBase):
         for s in self.signatures:
             l.info("Scanning %d addresses for signatures in '%s'", len(addrlist), s.header.library_name)
             for addr in addrlist:
-                start = addr ^ offset
-                end = addr + 128 # TODO: HACK. Symbols give a size. KB functions do not. Need something here
+                l.debug('Checking 0x%08x', addr)
+                start = addr - offset   # Removing the mapped_base
+                end = addr + 400        # TODO: HACK. Get function's actual size
+                self.bs.seek(start, 0)
+                buf = self.bs.read(end - start + FlirtScan._FUNCTION_TAIL_LENGTH)
+                nampa.match_function(s, buf, start, self.callback)
+
+    def _match_funcs(self, funclist, offset):
+        for s in self.signatures:
+            l.info("Scanning %d funcs for signatures in '%s'", len(funclist), s.header.library_name)
+            for func in funclist:
+                addr = func.addr        # TODO: Check for relative_addr (and/or change that name in the KB)
+                l.debug('Checking 0x%08x', addr)
+                start = addr - offset   # Removing the mapped_base
+                end = addr + func.size
                 self.bs.seek(start, 0)
                 buf = self.bs.read(end - start + FlirtScan._FUNCTION_TAIL_LENGTH)
                 nampa.match_function(s, buf, start, self.callback)
