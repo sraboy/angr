@@ -9,7 +9,7 @@ class Match:
     """
     Defines a positive match, or 'find', from a signature scan
     """
-    def __init__(self, funcname, funcaddr, kb, backend, rename_kb, duplicate):
+    def __init__(self, funcname, funcaddr, kb, backend, rename_kb, duplicate, flirtfunc):
         """
         :param funcname:    The name of the matched function
         :param funcaddr:    The address of the matched function
@@ -25,6 +25,7 @@ class Match:
         self.kb             = kb
         self.backend        = backend
         self.duplicate      = duplicate
+        self.flirtfunc      = flirtfunc
         
         if self.backend is not None:
             self._check_symbols()
@@ -172,13 +173,17 @@ class SigScan(Analysis):
         # TODO: Only get 'sub_*' KB funcs
         sym_funcs = []
         kb_funcs  = []
+        
         if self.use_sym is True:
             sym_funcs = [v for k,v in self.backend.symbols_by_addr.items() if v.is_function is True]
         if self.use_kb is True:
             kb_funcs = [v for k,v in self.kb.functions.items() if not v.is_syscall and not v.is_simprocedure and v.name.startswith('sub_')]
-        print sym_funcs
-        print kb_funcs
-        return set(sym_funcs + kb_funcs)        # TODO: Obviously, set doens't work on two different types...
+        l.debug(sym_funcs)
+        l.debug(kb_funcs)
+        allfuncs = list(sym_funcs + kb_funcs)
+        allfuncs.reverse()
+        l.debug(allfuncs)
+        return allfuncs        # TODO: Parse duplicates by addr
             
     def _get_addrs(self):
         """
@@ -296,19 +301,21 @@ class FlirtScan(SigScanBase):
         :param addr:    The offset of the function in the binary
         :param func:    A `nampa.FlirtFunction` object
         """
-        kb      = FlirtScan._cur_instance.kb
-        backend = FlirtScan._cur_instance.backend
-        rename  = FlirtScan._cur_instance.rename
+        fs      = FlirtScan._cur_instance
+        kb      = fs.kb
+        backend = fs.backend
+        rename  = fs.rename
         duplicate = False
-        for m in FlirtScan._cur_instance.matches:
+        
+        for m in fs.matches:
             if m.funcname == func.name: #or m.funcaddr == addr:
                 duplicate = True
                 l.warn('%s at 0x%08x is duplicate of %s at 0x%08x', func.name, addr, m.funcname, m.funcaddr)
 
         offaddr = addr + func.offset
-        match = Match(func.name, offaddr, kb, backend, rename, duplicate)
-        l.debug('Matched %s at %x', func.name, offaddr)
-        FlirtScan._cur_instance.matches.append(match)
+        match = Match(func.name, offaddr, kb, backend, rename, duplicate, func)
+        l.debug('Matched %s at 0x%04x -- %s', func.name, offaddr, func)
+        fs.matches.append(match)
 
     def scan(self):
         self._match_addrs(self.addrlist, self.offset)
