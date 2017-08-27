@@ -2,6 +2,7 @@ from . import Analysis, register_analysis
 import nampa
 import os
 import logging
+import operator
 
 l = logging.getLogger('angr.analyses.sigscan')
 
@@ -26,7 +27,8 @@ class Match:
         self.backend        = backend
         self.duplicate      = duplicate
         self.flirtfunc      = flirtfunc
-        
+        self.kbfunc         = None
+
         if self.backend is not None:
             self._check_symbols()
         if self.kb is not None:
@@ -45,7 +47,12 @@ class Match:
     def _check_kb(self):
         if self.funcaddr + self.backend.mapped_base in self.kb.functions:
             self.match_kb = True
-
+            self.kbfunc = self.kb.functions[self.funcaddr + self.backend.mapped_base]
+        else:
+            self.match_kb = False
+            self.kbfunc = self.kb.functions.function(addr=(self.funcaddr + self.backend.mapped_base), create=True)
+            self.kbfunc.name = self.funcname
+            
     def try_rename(self):
         if self.match_kb:
             if self.duplicate:
@@ -109,7 +116,7 @@ class SigScan(Analysis):
         if self.use_kb and not self.kb:
             self.use_kb = False
             l.warn('No KB found. Ignoring use_kb.')
-            
+
         try:
             ScanClass = registered_signature_scanners[method.lower()]
             self.scanner = ScanClass(addrlist=self._get_addrs(),
@@ -173,18 +180,19 @@ class SigScan(Analysis):
         # TODO: Only get 'sub_*' KB funcs
         sym_funcs = []
         kb_funcs  = []
-        
+
         if self.use_sym is True:
             sym_funcs = [v for k,v in self.backend.symbols_by_addr.items() if v.is_function is True]
         if self.use_kb is True:
             kb_funcs = [v for k,v in self.kb.functions.items() if not v.is_syscall and not v.is_simprocedure and v.name.startswith('sub_')]
-        l.debug(sym_funcs)
-        l.debug(kb_funcs)
-        allfuncs = list(sym_funcs + kb_funcs)
-        allfuncs.reverse()
+
+        # Two functions in a given FLIRT module are only differentiated by offset, so we
+        # must always find the lowest one first since the modules are checked in their
+        # natural, lower-to-higher offset, order.
+        allfuncs = sorted(list(sym_funcs + kb_funcs), key=operator.attrgetter('addr'))
         l.debug(allfuncs)
-        return allfuncs        # TODO: Parse duplicates by addr
-            
+        return allfuncs        # TODO: Parse/remove duplicates by addr
+
     def _get_addrs(self):
         """
         Returns the complete, sorted list of all addresses to scan based on provided options
@@ -239,7 +247,7 @@ class SigScanBase(object):
         self.backend    = backend
         self.offset     = offset
 
-        self.matches    = []
+        self.matches    = {}
 
         def scan(self):
             l.error('This method must be overridden by a child class which implements scanning.')
@@ -276,10 +284,14 @@ class FlirtScan(SigScanBase):
         """
 
         self.sigpath    = kwargs.get('sigpath', os.getcwd())
-        self.callback   = kwargs.get('callback', self._nampa_callback)
+        #self.callback   = kwargs.get('callback', self._nampa_callback)
+        self.callbacks = {'firstpass':  self._callback_first_pass,
+                          'secondpass': self._callback_second_pass,
+                          'matchrefs':  self._callback_match_refs }
+
         self.signatures = self._load_signatures(self.sigpath)
-
-
+        self.ref_matches = {}
+        self.refd_matches = {}
         # TODO: HACK for nampa
         # The callback from nampa has to be a static method since it only
         # passes its `func` instance and the address, so we need to keep
@@ -295,10 +307,10 @@ class FlirtScan(SigScanBase):
     _FUNCTION_TAIL_LENGTH = 0x100
 
     @staticmethod
-    def _nampa_callback(addr, func):
+    def _old_nampa_callback(addr, func, matched_ref=False):
         """
         The callback for nampa to call on every matched function
-        :param addr:    The offset of the function in the binary
+        :param addr:    The offset of the function in the supplied buffer
         :param func:    A `nampa.FlirtFunction` object
         """
         fs      = FlirtScan._cur_instance
@@ -306,16 +318,120 @@ class FlirtScan(SigScanBase):
         backend = fs.backend
         rename  = fs.rename
         duplicate = False
-        
-        for m in fs.matches:
-            if m.funcname == func.name: #or m.funcaddr == addr:
-                duplicate = True
-                l.warn('%s at 0x%08x is duplicate of %s at 0x%08x', func.name, addr, m.funcname, m.funcaddr)
+
+        #for m in fs.matches:
+        #    if m.funcname == func.name: #or m.funcaddr == addr:
+        #        duplicate = True
+        #        l.warn('%s at 0x%08x is duplicate of %s at 0x%08x', func.name, addr, m.funcname, m.funcaddr)
 
         offaddr = addr + func.offset
+        ref = func.refs_func.name if func.refs_func is not None else 'None'
+        if fs._first_pass:
+            l.debug('FIRSTPASS-CALLBACK: %s refs %s', func.name, ref)
+        else:
+            l.debug('SECONDPASS-CALLBACK: %s refs %s', func.name, ref)
+
+        #if func.refs_func is None:
+        for oldoffaddr,oldfunc in fs._matched_funcs.items():
+            if func.name == oldfunc.name:
+                l.debug('DUPLICATE: %s at 0x%04x was already found at 0x%04x.', func.name, offaddr, oldoffaddr)
+                if not matched_ref:
+                    return oldoffaddr
+                #else:
+                #    match = Match(func.name, offaddr, kb, backend, rename, duplicate, func)
+                #    oldmatch = None
+                #    for m in fs.matches:
+                #        if m.funcname == match.funcname:
+                #            m = match
+
         match = Match(func.name, offaddr, kb, backend, rename, duplicate, func)
-        l.debug('Matched %s at 0x%04x -- %s', func.name, offaddr, func)
+
+        #l.debug('Matched (NOREF) %s at 0x%04x -- %s', func.name, offaddr, func)
+        fs._matched_funcs[offaddr] = func
         fs.matches.append(match)
+        return offaddr
+        #else:
+            #if offaddr not in self._matched_funcs:
+            #    l.debug('Cannot confirm %s at 0x%04x. Refs %s at 0x%04x.', func.name, offaddr, func.refs_func.name, func.refs_func.addr)
+            #    return False
+            #else:
+            #match = Match(func.name, offaddr, kb, backend, rename, duplicate, func)
+            #l.debug('Matched (w/REF) %s at 0x%04x -- %s', func.name, offaddr, func)
+            #fs._matched_funcs[offaddr] = func
+            #fs.matches.append(match)
+            #return True
+    @staticmethod
+    def _callback_second_pass(addr, func):
+        fs      = FlirtScan._cur_instance
+        offaddr = addr + func.offset
+        ref = func.refs_func.name if func.refs_func is not None else 'None'
+        l.debug('SECONDPASS-CALLBACK: %s [0x%04x] refs %s', func.name, offaddr, ref)
+
+        if func.name in fs.matches:
+            l.debug('SECONDPASS-CALLBACK: %s re-found in matches', func.name)
+
+            oldoffaddr = fs.matches[func.name].funcaddr
+            match = Match(func.name, oldoffaddr, fs.kb, fs.backend, fs.rename, True, func)
+            fs.refd_matches[func.name] = match
+            #fs.ref_matches[oldoffaddr] = func
+            return oldoffaddr
+        else:
+            l.debug('SECONDPASS-CALLBACK: ****WHATSHAPPENING****')
+
+    @staticmethod
+    def _callback_match_refs(addr, func, refd_funcs):
+        
+        fs      = FlirtScan._cur_instance
+        l.debug('MATCHREF-CALLBACK: Checking %s. offset: 0x%04x, addr: 0x%04x', func.name, func.offset, addr)
+        ref_addrs = []
+        ref_funcs = []
+        m = None
+        try:
+            m = fs.matches[func.name]
+        except KeyError:
+            offaddr = addr + func.offset
+            l.debug('MATCHREF-CALLBACK: (NEW) %s at offaddr: 0x%04x', func.name, offaddr)
+            fs.matches[func.name] = Match(func.name, offaddr, fs.kb, fs.backend, fs.rename, False, func)
+        m = fs.matches[func.name]
+        refmatch = fs.matches[func.refs_func.name]
+        if refmatch.kbfunc is None:
+            #refmatch.kbfunc = refmatch.kb.functions.function(addr=(refmatch.funcaddr + refmatch.backend.mapped_base), create=True)
+            l.debug("%s refs %s. ref's kbfunc is %s", func.name, refmatch.funcname, refmatch.kbfunc.name)
+        #return False
+        ref_funcs.append(refmatch.kbfunc)
+        for cs in m.kbfunc._call_sites.keys():
+            ref_addrs.append(cs - fs.backend.mapped_base)       
+        if ref_addrs == []:
+            l.debug('MATCHREF-CALLBACK: %s has no ref_addrs.', m.funcname)
+        else:
+            l.debug('MATCHREF-CALLBACK: %s has ref_addrs: %s', m.funcname, ''.join(['0x{:04X}, '.format(a) for a in ref_addrs]))
+
+        
+        if refmatch.funcaddr in ref_addrs:
+            l.debug("Found 0x%04x in %s's ref_addrs", refmatch.funcaddr, refmatch.funcname)
+            l.debug('----------------- END MATCHREF -----------------')
+            return True
+        else:
+            l.debug("Failed to find 0x%04x in %s's ref_addrs", refmatch.funcaddr, refmatch.funcname)
+            l.debug('----------------- END MATCHREF -----------------')
+            return False
+        
+            
+    @staticmethod
+    def _callback_first_pass(addr, func):
+        """
+        The callback for nampa to call on every matched function
+        :param addr:    The offset of the function in the supplied buffer
+        :param func:    A `nampa.FlirtFunction` object
+        """
+        fs      = FlirtScan._cur_instance
+
+        offaddr = addr + func.offset
+        ref = func.refs_func.name if func.refs_func is not None else 'None'
+        l.debug('FIRSTPASS-CALLBACK: %s [0x%04x] refs %s', func.name, offaddr, ref)
+        match = Match(func.name, offaddr, fs.kb, fs.backend, fs.rename, False, func)
+        fs.matches[func.name] = match
+        return offaddr
 
     def scan(self):
         self._match_addrs(self.addrlist, self.offset)
@@ -347,18 +463,40 @@ class FlirtScan(SigScanBase):
                 buf = self.bs.read(end - start + FlirtScan._FUNCTION_TAIL_LENGTH)
                 nampa.match_function(s, buf, start, self.callback)
 
-    def _match_funcs(self, funclist, offset):
+    def _match_funcs(self, funclist, offset, first_pass=True, ref_addrs=[]):
+
+        if first_pass:
+            l.debug('************** FIRST PASS SCAN **************')
+        else:
+            l.debug('************** SECOND PASS SCAN **************')
+
+        no_match_funcs = []
         for s in self.signatures:
             l.info("Scanning %d funcs for signatures in '%s'", len(funclist), s.header.library_name)
             for func in funclist:
                 addr = func.addr        # TODO: Check for relative_addr (and/or change that name in the KB)
                 l.debug('Checking 0x%08x', addr)
                 start = addr - offset   # Removing the mapped_base
-                end = addr + func.size
+                end = start + func.size
                 self.bs.seek(start, 0)
                 buf = self.bs.read(end - start + FlirtScan._FUNCTION_TAIL_LENGTH)
-                nampa.match_function(s, buf, start, self.callback)
 
+                if nampa.match_function(s, buf, start, self.callbacks, first_pass, ref_addrs):
+                    no_match_funcs.append(func)
+            if first_pass:
+                self._match_funcs(funclist, offset, False)
+            #if first_pass:
+            #    ref_funcs = []
+            #    for m in [mr for mr in self.matches if mr.flirtfunc.refs_func is not None]:
+            #        ref_funcs.append(m.kbfunc)
+            #        for cs in m.kbfunc._call_sites.keys():
+            #            ref_addrs.append(cs - offset)
+            #    self._match_funcs(ref_funcs, offset, get_refs, sorted(set(ref_addrs)))
+                #for offaddr,func in self._matched_funcs.items():
+                #    print '---- Remove %s at 0x%08x for second pass' % (func.name, offaddr)
+                #    pass2funcs = [f for f in funclist if f not in no_match_funcs]
+
+                #self._match_funcs(pass2funcs, offset, get_refs)
 
 register_analysis(SigScan, 'SigScan')
 
