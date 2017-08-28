@@ -1,6 +1,6 @@
 from .plugin import KnowledgeBasePlugin
-
-
+import logging
+l = logging.getLogger('angr.knowledge_plugins.labels')
 class Labels(KnowledgeBasePlugin):
 
     def __init__(self, kb):
@@ -30,6 +30,7 @@ class Labels(KnowledgeBasePlugin):
 
     def __setitem__(self, k, v):
         del self[k]
+        l.error('***** Setting self._labels[0x%08x] = %s', k, v)
         self._labels[k] = v
         self._reverse_labels[v] = k
         if k in self._kb.functions:
@@ -37,7 +38,12 @@ class Labels(KnowledgeBasePlugin):
 
     def __delitem__(self, k):
         if k in self._labels:
-            del self._reverse_labels[self._labels[k]]
+            try:
+                del self._reverse_labels[self._labels[k]]
+            except KeyError:
+                l.error('%s found in _labels but not _reverse_labels', self._labels[k])
+                raise
+                
             del self._labels[k]
 
     def __contains__(self, k):
